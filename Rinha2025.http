@@ -1,0 +1,19 @@
+@Rinha2025_HostAddress = http://localhost:9999
+
+GET {{Rinha2025_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
+POST {{Rinha2025_HostAddress}}/payments/
+Content-Type: application/json
+Accept: application/json
+
+{
+  "correlationId": "09d687fa-8627-41be-bf3b-7f753a1da04a",
+  "amount": 100
+}
+
+###
+
+GET {{Rinha2025_HostAddress}}/clean-database/
+Accept: application/json
