@@ -17,7 +17,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: semantic-release/action@v1
+      - uses: cycjimmy/semantic-release-action@v4
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
