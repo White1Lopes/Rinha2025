@@ -1,5 +1,6 @@
 name: Release
 
+
 on:
   workflow_dispatch:
   push:
@@ -23,7 +24,9 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.100-preview.7.25380.108
-   
+
+      - name: Give permission updateVersion.sh
+        run: chmod +x ./updateVersion.sh
 
       - name: Semantic Release
         id: release
