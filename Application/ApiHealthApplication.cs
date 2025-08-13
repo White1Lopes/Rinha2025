@@ -9,6 +9,7 @@ public interface IApiHealthApplicaiton
 {
     Task<ApiHealthStatus> IsHealthyAsync(string processorName);
     Task<ApiHealthStatus> GetHealthStatusAsync(string processorName);
+    Task MarkAsUnhealthyAsync(string processorName);
 }
 
 public record ApiHealthStatus(bool IsHealthy, DateTime LastCheck, int ConsecutiveFailures, int MinResponseTime);
@@ -71,6 +72,23 @@ public class ApiHealthApplication(
 
 
         return await CheckAndUpdateHealthAsync(processorName);
+    }
+
+    public async Task MarkAsUnhealthyAsync(string processorName)
+    {
+        var cacheKey = $"{_cacheKey}:{processorName}";
+        var lockKey = $"{cacheKey}:lock";
+        var lockExists = await _database.KeyExistsAsync(lockKey);
+
+        if (!lockExists)
+        {
+            await _database.HashSetAsync(cacheKey, [
+                new("IsHealthy", "false"),
+                new("LastCheck", DateTime.UtcNow.ToString("O")),
+                new("ConsecutiveFailures", "1"),
+                new("MinResponseTime", "0")
+            ]);
+        }
     }
 
     private async Task<ApiHealthStatus> CheckAndUpdateHealthAsync(string processorName)

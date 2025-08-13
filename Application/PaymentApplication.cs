@@ -103,15 +103,18 @@ public class PaymentApplication(
                 : _httpClientFallback;
 
             var response = await _retryPolicy.ExecuteAsync(async () => await httpClient.PostAsJsonAsync(
-            "/payments", paymentRecord, _jsonPolicy
+                "/payments", paymentRecord, _jsonPolicy
             ).ConfigureAwait(false));
 
             // var response = await httpClient.PostAsJsonAsync(
             //     "/payments", paymentRecord, _jsonPolicy
             // ).ConfigureAwait(false);
-            
+
             if (!response.IsSuccessStatusCode)
+            {
+                // _ = Task.Run(() => healthService.MarkAsUnhealthyAsync(processorName).ConfigureAwait(false));
                 return false;
+            }
 
             await SaveProcessedPaymentAsync(new RequestPaymentProcessedRecord(
                 paymentRecord.CorrelationId,

@@ -1,6 +1,7 @@
 ﻿x-services-templates:
   api: &api-template
-    image: ghcr.io/white1lopes/rinha-2025:latest
+    image: api
+#    image: ghcr.io/white1lopes/rinha-2025:latest
     ports:
       - "8080"
     build:
@@ -19,7 +20,7 @@
     deploy:
       resources:
         limits:
-          cpus: "0.65"
+          cpus: "0.6"
           memory: "140MB"
           
 services:
@@ -59,7 +60,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.1"
+          cpus: "0.2"
           memory: "30MB"
 
 networks:
