@@ -24,6 +24,10 @@ builder.WebHost.ConfigureKestrel(options =>
     options.AddServerHeader = false;
 });
 
+builder.Logging
+    .ClearProviders()
+    .SetMinimumLevel(LogLevel.Error);
+
 
 var initRedisPolicy = Policy
     .Handle<Exception>()
