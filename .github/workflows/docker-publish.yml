@@ -46,9 +46,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up .env file from secrets
-        run: cp .env.example .env
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
