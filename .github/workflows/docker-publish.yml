@@ -9,6 +9,7 @@ on:
 permissions:
   contents: write
   packages: write
+  issues: write
 
 jobs:
   release:
@@ -77,5 +78,5 @@ jobs:
           target: prod
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/white1lopes/rinha-2025:${{ steps.get_tag.outputs.tag }}
+            ghcr.io/white1lopes/rinha-2025:${{ steps.release.outputs.tag }}
             ghcr.io/white1lopes/rinha-2025:latest
