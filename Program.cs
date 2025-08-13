@@ -1,15 +1,11 @@
 using System.Buffers;
-using System.Diagnostics;
 using System.Net;
-using System.Net.Security;
-using System.Net.Sockets;
 using System.Text.Json;
-using Disruptor.Dsl;
 using Microsoft.AspNetCore.Mvc;
 using Polly;
 using Rinha2025.Application;
 using Rinha2025.Records;
-using Rinha2025.Structs;
+using Rinha2025.Repository;
 using Rinha2025.Utils;
 using Rinha2025.Workers;
 using StackExchange.Redis;
@@ -23,11 +19,10 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.KeepAliveTimeout = TimeSpan.FromSeconds(30);
     options.Limits.MaxConcurrentConnections = 10000;
     options.Limits.MaxConcurrentUpgradedConnections = 10000;
-    
+
     options.AllowSynchronousIO = false;
     options.AddServerHeader = false;
 });
-
 
 
 var initRedisPolicy = Policy
@@ -57,6 +52,7 @@ builder.Services.AddSingleton<IConnectionMultiplexer>(provider =>
 });
 
 builder.Services.AddScoped<IPaymentApplication, PaymentApplication>();
+builder.Services.AddSingleton<IRedisRepository, RedisRepository>();
 builder.Services.AddSingleton<IApiHealthApplicaiton, ApiHealthApplication>();
 
 
@@ -78,7 +74,7 @@ builder.Services.AddHttpClient($"{Constants.DefaultProcessorName}_payments",
         opt =>
         {
             opt.BaseAddress = new Uri(builder.Configuration["default_url"] ?? Constants.DefaultProcessorUrl);
-            opt.Timeout = TimeSpan.FromSeconds(2); 
+            opt.Timeout = TimeSpan.FromSeconds(2);
             opt.DefaultRequestHeaders.ConnectionClose = false;
             opt.DefaultRequestHeaders.Add("Connection", "keep-alive");
             opt.DefaultRequestVersion = HttpVersion.Version11;
@@ -90,11 +86,11 @@ builder.Services.AddHttpClient($"{Constants.DefaultProcessorName}_payments",
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
         PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
         EnableMultipleHttp2Connections = false,
-        ConnectTimeout = TimeSpan.FromMilliseconds(300), 
-        
+        ConnectTimeout = TimeSpan.FromMilliseconds(300),
+
         AutomaticDecompression = DecompressionMethods.GZip,
-        
-        UseCookies = false, 
+
+        UseCookies = false,
     })
     .SetHandlerLifetime(TimeSpan.FromMinutes(5));
 
@@ -114,10 +110,10 @@ builder.Services.AddHttpClient($"{Constants.FallbackProcessorName}_payments",
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
         PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
         EnableMultipleHttp2Connections = false,
-        ConnectTimeout = TimeSpan.FromMilliseconds(300), 
-        
+        ConnectTimeout = TimeSpan.FromMilliseconds(300),
+
         AutomaticDecompression = DecompressionMethods.GZip,
-        
+
         UseCookies = false,
     })
     .SetHandlerLifetime(TimeSpan.FromMinutes(5));
@@ -126,7 +122,7 @@ builder.Services.AddHttpClient(Constants.DefaultProcessorName,
         opt =>
         {
             opt.BaseAddress = new Uri(builder.Configuration["default_url"] ?? Constants.DefaultProcessorUrl);
-            opt.Timeout = TimeSpan.FromSeconds(10); 
+            opt.Timeout = TimeSpan.FromSeconds(10);
             opt.DefaultRequestHeaders.ConnectionClose = false;
         })
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler()
@@ -135,7 +131,7 @@ builder.Services.AddHttpClient(Constants.DefaultProcessorName,
         PooledConnectionLifetime = TimeSpan.FromMinutes(15),
         PooledConnectionIdleTimeout = TimeSpan.FromMinutes(10),
         EnableMultipleHttp2Connections = true,
-        ConnectTimeout = TimeSpan.FromSeconds(2), 
+        ConnectTimeout = TimeSpan.FromSeconds(2),
         AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate
     })
     .SetHandlerLifetime(TimeSpan.FromMinutes(15));
@@ -161,20 +157,19 @@ builder.Services.AddHttpClient(Constants.FallbackProcessorName,
 var app = builder.Build();
 
 
-
 app.MapPost("/payments", async (HttpContext context, IPaymentApplication paymentApplication) =>
 {
     var reader = context.Request.BodyReader;
     var result = await reader.ReadAsync();
     var buffer = result.Buffer;
-    
+
     var rentedArray = ArrayPool<byte>.Shared.Rent((int)buffer.Length);
     try
     {
         buffer.CopyTo(rentedArray);
         var jsonContent = System.Text.Encoding.UTF8.GetString(rentedArray, 0, (int)buffer.Length);
         reader.AdvanceTo(buffer.End);
-        
+
         _ = paymentApplication.RequestPaymentRawAsync(jsonContent);
         return Results.Accepted();
     }
@@ -187,8 +182,11 @@ app.MapPost("/payments", async (HttpContext context, IPaymentApplication payment
 
 app.MapGet("/payments-summary",
     async ([FromQuery] DateTimeOffset to,
-            [FromQuery] DateTimeOffset from, [FromServices] IPaymentApplication paymentApplication) =>
-        Results.Ok(await paymentApplication.GetPaymentSummaryAsync(new RequestSummaryPaymentRecord(to, from))));
+        [FromQuery] DateTimeOffset from, [FromServices] IPaymentApplication paymentApplication) =>
+    {
+        return Results.Ok(await paymentApplication.GetPaymentSummaryAsync(new RequestSummaryPaymentRecord(to, from)));
+    }
+);
 
 app.MapGet("clean-database", ([FromServices] IPaymentApplication paymentApplication) =>
 {

@@ -3,6 +3,7 @@
 public static class Constants
 {
     public const string RedisQueueKey = "payment:queue";
+    public const string RedisQueueProcessingKey = "payment:processing";
     public const string RedisPaymentProcessedKey = "payment:processed";
     public const string DefaultProcessorName = "default";
     public const string DefaultProcessorUrl = "http://payment-processor-default:8080";

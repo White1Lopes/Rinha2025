@@ -2,6 +2,9 @@
 using Rinha2025.Records;
 using StackExchange.Redis;
 using System.Text.Json;
+using Polly;
+using Polly.Retry;
+using Rinha2025.Repository;
 using Rinha2025.Utils;
 
 namespace Rinha2025.Application;
@@ -10,46 +13,51 @@ public interface IPaymentApplication
 {
     Task RequestPaymentAsync(RequestPaymentRecord record);
     Task RequestPaymentRawAsync(string jsonPayload);
-    Task ProcessPaymentAsync(RequestPaymentRecord paymentRecord);
+    Task ProcessPaymentAsync(RequestPaymentRecord paymentRecord, DateTimeOffset processedAt);
     Task SaveProcessedPaymentAsync(RequestPaymentProcessedRecord processedRecord);
     Task<SummaryResponseRecord> GetPaymentSummaryAsync(RequestSummaryPaymentRecord request);
     void CleanDatabase();
 }
 
 public class PaymentApplication(
-    IConnectionMultiplexer multiplexer,
+    IRedisRepository repository,
     IHttpClientFactory httpClientFactory,
     IApiHealthApplicaiton healthService) : IPaymentApplication
 {
-    private const string QueueKey = Constants.RedisQueueKey;
-    private readonly IDatabase _database = multiplexer.GetDatabase();
-    
-    private readonly HttpClient _httpClientDefault = httpClientFactory.CreateClient($"{Constants.DefaultProcessorName}_payments");
-    private readonly HttpClient _httpClientFallback = httpClientFactory.CreateClient($"{Constants.FallbackProcessorName}_payments");
+    private readonly HttpClient _httpClientDefault =
+        httpClientFactory.CreateClient($"{Constants.DefaultProcessorName}_payments");
 
+    private readonly HttpClient _httpClientFallback =
+        httpClientFactory.CreateClient($"{Constants.FallbackProcessorName}_payments");
+
+    private readonly JsonSerializerOptions _jsonPolicy = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        TypeInfoResolver = AppJsonSerializerContext.Default
+    };
+
+    private readonly AsyncRetryPolicy<HttpResponseMessage> _retryPolicy =
+        Policy.HandleResult<HttpResponseMessage>(result => !result.IsSuccessStatusCode)
+            .Or<HttpRequestException>()
+            .Or<TaskCanceledException>()
+            .RetryAsync(2);
 
     public async Task RequestPaymentAsync(RequestPaymentRecord record)
     {
-        await _database.ListLeftPushAsync(QueueKey,
-                JsonSerializer.Serialize(record, AppJsonSerializerContext.Default.RequestPaymentRecord))
-            .ConfigureAwait(false);
+        _ = Task.Run(() =>
+            repository.EnqueueAsync(JsonSerializer.Serialize(record,
+                AppJsonSerializerContext.Default.RequestPaymentRecord)));
     }
 
     public Task RequestPaymentRawAsync(string jsonPayload)
     {
-        _database.ListLeftPushAsync((RedisKey)QueueKey, (RedisValue)jsonPayload, When.Always, CommandFlags.FireAndForget);
+        _ = Task.Run(() =>
+            repository.EnqueueAsync(jsonPayload));
         return Task.CompletedTask;
     }
 
-    public async Task ProcessPaymentAsync(RequestPaymentRecord paymentRecord)
+    public async Task ProcessPaymentAsync(RequestPaymentRecord paymentRecord, DateTimeOffset requestedAt)
     {
-        var jsonPolicy = new JsonSerializerOptions()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            TypeInfoResolver = AppJsonSerializerContext.Default
-        };
-        var requestedAt = DateTimeOffset.UtcNow;
-
         var request = new RequestPaymentProcessorRecord(
             paymentRecord.CorrelationId,
             requestedAt,
@@ -59,82 +67,104 @@ public class PaymentApplication(
         var defaultHealthy = await healthService.IsHealthyAsync(Constants.DefaultProcessorName);
         var fallbackHealthy = await healthService.IsHealthyAsync(Constants.FallbackProcessorName);
 
-
-        if (defaultHealthy)
+        if (defaultHealthy.IsHealthy && fallbackHealthy.IsHealthy)
         {
-            try
+            if (defaultHealthy.MinResponseTime <= fallbackHealthy.MinResponseTime)
             {
-                var response = await _httpClientDefault.PostAsJsonAsync(
-                    "/payments", request, jsonPolicy
-                ).ConfigureAwait(false);
-
-                var defaultSuccess = response.IsSuccessStatusCode;
-
-                if (defaultSuccess)
-                {
-                    _ = Task.Run(() => SaveProcessedPaymentAsync(new RequestPaymentProcessedRecord(
-                        paymentRecord.CorrelationId,
-                        requestedAt,
-                        paymentRecord.Amount,
-                        Constants.DefaultProcessorName
-                    ))).ConfigureAwait(false);
-                    return;
-                }
+                if (await CallProcessor(Constants.DefaultProcessorName, request)) return;
+                if (await CallProcessor(Constants.FallbackProcessorName, request)) return;
             }
-            catch (Exception)
+            else
             {
+                if (await CallProcessor(Constants.FallbackProcessorName, request)) return;
+                if (await CallProcessor(Constants.DefaultProcessorName, request)) return;
             }
         }
-
-        if (fallbackHealthy)
+        else if (defaultHealthy.IsHealthy)
         {
-            try
-            {
-                var fallbackResponse = await _httpClientFallback.PostAsJsonAsync(
-                    "/payments", request, jsonPolicy
-                ).ConfigureAwait(false);
-                
-                
-                var fallbackSuccess = fallbackResponse.IsSuccessStatusCode;
-
-                if (fallbackSuccess)
-                {
-                    _ = Task.Run(()=> SaveProcessedPaymentAsync(new RequestPaymentProcessedRecord(
-                        paymentRecord.CorrelationId,
-                        requestedAt,
-                        paymentRecord.Amount,
-                        Constants.FallbackProcessorName
-                    ))).ConfigureAwait(false);
-                    return;
-                }
-            }
-            catch (Exception e)
-            {
-            }
+            if (await CallProcessor(Constants.DefaultProcessorName, request)) return;
+        }
+        else if (fallbackHealthy.IsHealthy)
+        {
+            if (await CallProcessor(Constants.FallbackProcessorName, request)) return;
         }
 
-        await _database.ListLeftPushAsync(QueueKey,
-            JsonSerializer.Serialize(paymentRecord, AppJsonSerializerContext.Default.RequestPaymentRecord));
+        _ = Task.Run(() => repository.EnqueueProcessingErrorAsync(JsonSerializer.Serialize(request,
+                AppJsonSerializerContext.Default.RequestPaymentProcessorRecord),
+            JsonSerializer.Serialize(paymentRecord, AppJsonSerializerContext.Default.RequestPaymentRecord)));
+    }
+
+    private async Task<bool> CallProcessor(string processorName, RequestPaymentProcessorRecord paymentRecord)
+    {
+        try
+        {
+            var httpClient = processorName == Constants.DefaultProcessorName
+                ? _httpClientDefault
+                : _httpClientFallback;
+
+            var response = await _retryPolicy.ExecuteAsync(async () => await httpClient.PostAsJsonAsync(
+            "/payments", paymentRecord, _jsonPolicy
+            ).ConfigureAwait(false));
+
+            // var response = await httpClient.PostAsJsonAsync(
+            //     "/payments", paymentRecord, _jsonPolicy
+            // ).ConfigureAwait(false);
+            
+            if (!response.IsSuccessStatusCode)
+                return false;
+
+            await SaveProcessedPaymentAsync(new RequestPaymentProcessedRecord(
+                paymentRecord.CorrelationId,
+                paymentRecord.RequestedAt,
+                paymentRecord.Amount,
+                processorName
+            )).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
     }
 
     public async Task SaveProcessedPaymentAsync(RequestPaymentProcessedRecord processedRecord)
     {
-        await SaveProcessedPaymentToListAsync(processedRecord);
-    }
-
-    public async Task SaveProcessedPaymentToListAsync(RequestPaymentProcessedRecord processedRecord)
-    {
-        var paymentData = JsonSerializer.Serialize(processedRecord,
-            AppJsonSerializerContext.Default.RequestPaymentProcessedRecord);
-
-        await _database.ListLeftPushAsync(Constants.RedisPaymentProcessedKey, paymentData).ConfigureAwait(false);
+        _ = Task.Run(() =>
+            repository.MarkAsProcessedAsync(
+                JsonSerializer.Serialize(new RequestPaymentProcessorRecord(
+                        processedRecord.CorrelationId,
+                        processedRecord.ProcessedAt,
+                        processedRecord.Amount),
+                    AppJsonSerializerContext.Default.RequestPaymentProcessorRecord),
+                JsonSerializer.Serialize(processedRecord,
+                    AppJsonSerializerContext.Default.RequestPaymentProcessedRecord)));
     }
 
     public async Task<SummaryResponseRecord> GetPaymentSummaryAsync(RequestSummaryPaymentRecord request)
     {
-        var allPayments = await _database.ListRangeAsync(Constants.RedisPaymentProcessedKey).ConfigureAwait(false);
+        RedisValue[] processed;
+        do
+        {
+            (processed, var processing) = await repository.GetPaymentsOnProcessedAndProcessingAsync();
 
-        if (allPayments.Length == 0)
+            var processingInRange = processing
+                .Select(x => JsonSerializer.Deserialize<RequestPaymentProcessorRecord>(x,
+                    AppJsonSerializerContext.Default.RequestPaymentProcessorRecord))
+                .Any(x => x.RequestedAt >= request.From && x.RequestedAt <= request.To);
+
+            if (!processingInRange)
+                break;
+
+            await Task.Delay(5);
+        } while (true);
+
+
+        var processedRecords = processed.Select(x =>
+                JsonSerializer.Deserialize<RequestPaymentProcessedRecord>(x,
+                    AppJsonSerializerContext.Default.RequestPaymentProcessedRecord))
+            .ToArray();
+
+        if (processedRecords.Length == 0)
         {
             return new SummaryResponseRecord(new SummaryData(0, 0), new SummaryData(0, 0));
         }
@@ -144,13 +174,10 @@ public class PaymentApplication(
         var fallbackRequest = 0;
         var fallbackAmount = 0m;
 
-        foreach (var paymentJson in allPayments)
+        foreach (var payment in processedRecords)
         {
             try
             {
-                var payment = JsonSerializer.Deserialize<RequestPaymentProcessedRecord>(
-                    paymentJson!, AppJsonSerializerContext.Default.RequestPaymentProcessedRecord);
-
                 if (payment == null) continue;
 
 
@@ -183,9 +210,6 @@ public class PaymentApplication(
 
     public void CleanDatabase()
     {
-        _database.Execute("FLUSHDB");
-        _database.KeyDelete(Constants.RedisQueueKey);
-        _database.KeyDelete(Constants.RedisPaymentProcessedKey);
-        _database.KeyDelete($"{Constants.RedisPaymentProcessedKey}:list");
+        repository.CleanDatabaseAsync();
     }
 }

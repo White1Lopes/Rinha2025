@@ -4,7 +4,7 @@ using StackExchange.Redis;
 
 namespace Rinha2025.Workers;
 
-public class ApiHealthMonitorWorker(IApiHealthApplicaiton healthService, IConnectionMultiplexer multiplexer) : BackgroundService
+public class ApiHealthMonitorWorker(IApiHealthApplicaiton healthService) : BackgroundService
 {
     private const int CheckIntervalSeconds = 5;
     

@@ -2,22 +2,30 @@ using Rinha2025.Records;
 using StackExchange.Redis;
 using System.Text.Json;
 using Rinha2025.Application;
+using Rinha2025.Repository;
 using Rinha2025.Utils;
 
 namespace Rinha2025.Workers;
 
-public class PaymentWorker(
-    IConnectionMultiplexer multiplexer,
-    IServiceScopeFactory serviceScopeFactory)
+public class PaymentWorker
     : BackgroundService
 {
     private const string QueueKey = Constants.RedisQueueKey;
-    private readonly IDatabase _database = multiplexer.GetDatabase();
+    private readonly IServiceScopeFactory serviceScopeFactory;
 
-    private const int BatchSize = 200;
-    private const int MaxConcurrency = 10;
+    private readonly SemaphoreSlim _semaphore;
+    private const int BatchSize = 100;
+    private readonly int _maxConcurrency;
 
-    private readonly SemaphoreSlim _semaphore = new(MaxConcurrency, MaxConcurrency);
+    public PaymentWorker(
+        IServiceScopeFactory serviceScopeFactory)
+    {
+        this.serviceScopeFactory = serviceScopeFactory;
+        ThreadPool.GetMaxThreads( out var workerThreads, out var completionPortThreads);
+        _maxConcurrency = Math.Max(1, (int)(completionPortThreads * 2));
+        _semaphore = new(_maxConcurrency, _maxConcurrency);
+    }
+
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -25,16 +33,19 @@ public class PaymentWorker(
         {
             try
             {
-                var results = await _database.ListRightPopAsync(QueueKey, BatchSize);
+                using var scope = serviceScopeFactory.CreateScope();
+                var redisRepository = scope.ServiceProvider.GetRequiredService<IRedisRepository>();
+                var processedAt = DateTimeOffset.UtcNow;
+                var results = await redisRepository.DequeueBatchAsync(BatchSize, processedAt);
 
-                if (results.Length == 0)
+                if (results.Count == 0)
                 {
+                    await Task.Delay(5, stoppingToken);
                     continue;
                 }
 
                 var tasks = results
-                    .Where(result => result.HasValue)
-                    .Select(result => ProcessPaymentWithSemaphoreAsync(result!, stoppingToken));
+                    .Select(result => ProcessPaymentWithSemaphoreAsync(result!,processedAt, stoppingToken));
 
                 await Task.WhenAll(tasks);
             }
@@ -49,7 +60,7 @@ public class PaymentWorker(
         }
     }
 
-    private async Task ProcessPaymentWithSemaphoreAsync(RedisValue result, CancellationToken cancellationToken)
+    private async Task ProcessPaymentWithSemaphoreAsync(RedisValue result,DateTimeOffset processedAt, CancellationToken cancellationToken)
     {
         await _semaphore.WaitAsync(cancellationToken);
         try
@@ -58,19 +69,34 @@ public class PaymentWorker(
                 AppJsonSerializerContext.Default.RequestPaymentRecord);
 
 
-            await ProcessPaymentInternalAsync(paymentRecord, cancellationToken);
+            using var scope = serviceScopeFactory.CreateScope();
+            var paymentApplication = scope.ServiceProvider.GetRequiredService<IPaymentApplication>();
+
+            await paymentApplication.ProcessPaymentAsync(paymentRecord,processedAt);
         }
         finally
         {
             _semaphore.Release();
         }
     }
-
-    private async Task ProcessPaymentInternalAsync(RequestPaymentRecord record, CancellationToken cancellationToken)
+    
+    private async Task ProcessPaymentWithSemaphoreAsync(string result,DateTimeOffset processedAt, CancellationToken cancellationToken)
     {
-        using var scope = serviceScopeFactory.CreateScope();
-        var paymentApplication = scope.ServiceProvider.GetRequiredService<IPaymentApplication>();
+        await _semaphore.WaitAsync(cancellationToken);
+        try
+        {
+            var paymentRecord = JsonSerializer.Deserialize<RequestPaymentRecord>(result!,
+                AppJsonSerializerContext.Default.RequestPaymentRecord);
 
-        await paymentApplication.ProcessPaymentAsync(record);
+
+            using var scope = serviceScopeFactory.CreateScope();
+            var paymentApplication = scope.ServiceProvider.GetRequiredService<IPaymentApplication>();
+
+            await paymentApplication.ProcessPaymentAsync(paymentRecord,processedAt);
+        }
+        finally
+        {
+            _semaphore.Release();
+        }
     }
 }
