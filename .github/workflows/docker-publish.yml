@@ -1,9 +1,9 @@
-name: Test push to main  
+name: Test push to master  
 
 on:
   push:
     branches:
-      - main
+      - master
 
 permissions:
   contents: read
