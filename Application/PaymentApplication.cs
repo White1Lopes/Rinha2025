@@ -146,6 +146,7 @@ public class PaymentApplication(
     public async Task<SummaryResponseRecord> GetPaymentSummaryAsync(RequestSummaryPaymentRecord request)
     {
         RedisValue[] processed;
+        var doNotNeedToCheckProcessing = !request.To.HasValue || !request.From.HasValue;
         request = new RequestSummaryPaymentRecord(
             To: request.To ?? DateTimeOffset.UtcNow.AddYears(1),
             From: request.From ?? DateTimeOffset.UtcNow.AddDays(-7)
@@ -153,7 +154,10 @@ public class PaymentApplication(
         do
         {
             (processed, var processing) = await repository.GetPaymentsOnProcessedAndProcessingAsync();
-
+            
+            if(doNotNeedToCheckProcessing)
+                break;
+            
             var processingInRange = processing
                 .Select(x => JsonSerializer.Deserialize<RequestPaymentProcessorRecord>(x,
                     AppJsonSerializerContext.Default.RequestPaymentProcessorRecord))
