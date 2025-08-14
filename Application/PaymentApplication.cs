@@ -146,6 +146,10 @@ public class PaymentApplication(
     public async Task<SummaryResponseRecord> GetPaymentSummaryAsync(RequestSummaryPaymentRecord request)
     {
         RedisValue[] processed;
+        request = new RequestSummaryPaymentRecord(
+            To: request.To ?? DateTimeOffset.UtcNow.AddYears(1),
+            From: request.From ?? DateTimeOffset.UtcNow.AddDays(-7)
+        );
         do
         {
             (processed, var processing) = await repository.GetPaymentsOnProcessedAndProcessingAsync();

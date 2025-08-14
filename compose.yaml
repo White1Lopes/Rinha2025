@@ -1,7 +1,6 @@
 ﻿x-services-templates:
   api: &api-template
-    image: api
-#    image: ghcr.io/white1lopes/rinha-2025:latest
+    image: api 
     ports:
       - "8080"
     build:

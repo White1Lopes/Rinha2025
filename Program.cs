@@ -185,8 +185,8 @@ app.MapPost("/payments", async (HttpContext context, IPaymentApplication payment
 
 
 app.MapGet("/payments-summary",
-    async ([FromQuery] DateTimeOffset to,
-        [FromQuery] DateTimeOffset from, [FromServices] IPaymentApplication paymentApplication) =>
+    async ([FromQuery] DateTimeOffset? to,
+        [FromQuery] DateTimeOffset? from, [FromServices] IPaymentApplication paymentApplication) =>
     {
         return Results.Ok(await paymentApplication.GetPaymentSummaryAsync(new RequestSummaryPaymentRecord(to, from)));
     }

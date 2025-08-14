@@ -18,8 +18,8 @@ public record struct RequestPaymentProcessedRecord(
 );
 
 public record struct RequestSummaryPaymentRecord(
-    DateTimeOffset To,
-    DateTimeOffset From
+    DateTimeOffset? To,
+    DateTimeOffset? From
 );
 
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
